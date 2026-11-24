@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGODB_URI")
+}
+
+model PaymentList {
+  id              String   @id @map("_id") @db.ObjectId
+  response_code   Json?
+  auth_code       Json?
+  auth_message    String?
+  payment_time    DateTime
+  card_hash       String?
+  pan_mask        String?
+  fare            Int?
+  gateway_usn     String?
+  pay_result      String?
+  first_ride      String?
+  auth_number     String?
+  refer_rec_neg   String?
+  payment_id      String?
+  transaction_uid String?
+  card_code       Int?
+  type_pay        Int?
+
+  @@map("payment_list")
+}
+
+model TapPayList {
+  id              String  @id @map("_id") @db.ObjectId
+  transaction_uid String
+  unique_id       String?
+
+  @@map("tap_pay_list")
+}
+
+model TapLog {
+  id               String    @id @map("_id") @db.ObjectId
+  tap_receiv       DateTime?
+  tap_read         DateTime?
+  sam              String?
+  serial_number    String?
+  unique_id        String
+  card_hash        String?
+  pan_mask         String?
+  tap_status       Int?
+  terminal_version String?
+  app_priority     Int?
+  app_data         Json?
+  hash_aux         String?
+  app_name         String?
+  terminal_id      String?
+  card_code        Int?
+  type_pay         Int?
+
+  @@map("tap_log")
+}
+
+model BrandAidProp {
+  id         String @id @map("_id") @db.ObjectId
+  card_code  Int
+  brand      String
+  brand_type String
+
+  @@map("brand_aid_prop")
+}
+
+model TypesPay {
+  id                String @id @map("_id") @db.ObjectId
+  type_pay          Int
+  transaction_midia String
+
+  @@map("types_pay")
+}
+
+model TerminalTreeHistorical {
+  id                String @id @map("_id") @db.ObjectId
+  terminal_id       String
+  local_description String
+  group_desc        String
+  subgroup          String
+  initial_date      String
+  final_date        String
+
+  @@map("terminal_tree_historical")
+}
