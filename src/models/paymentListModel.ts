@@ -24,6 +24,7 @@ export type PaymentListItem = {
   refer_rec_neg: string | null;
   payment_id: string | null;
   transaction_uid: string | null;
+  acq_name: string | null;
 };
 
 export type GetPaymentListInput = {

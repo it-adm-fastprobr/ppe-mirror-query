@@ -23,6 +23,7 @@ model PaymentList {
   refer_rec_neg   String?
   payment_id      String?
   transaction_uid String?
+  acq_name        String?
   card_code       Int?
   type_pay        Int?
 

@@ -46,6 +46,7 @@ const payment = {
   refer_rec_neg: "uid-3",
   payment_id: "pay-4",
   transaction_uid: "uid-4",
+  acq_name: "CIELO 1",
   card_code: 1,
   type_pay: 1
 };
@@ -182,7 +183,8 @@ describe("GET /api/payment-list", () => {
           auth_number: "123456",
           refer_rec_neg: "uid-3",
           payment_id: "pay-4",
-          transaction_uid: "uid-4"
+          transaction_uid: "uid-4",
+          acq_name: "CIELO 1"
         }
       ],
       pagination: { page: 1, pageSize: 50, total: 1, totalPages: 1 }

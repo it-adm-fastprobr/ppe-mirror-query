@@ -34,7 +34,8 @@ const RESPONSE_FIELDS = [
   "auth_number",
   "refer_rec_neg",
   "payment_id",
-  "transaction_uid"
+  "transaction_uid",
+  "acq_name"
 ];
 
 const DAY: GetPaymentListInput = { paymentTimeStart: "2026-11-23", paymentTimeEnd: "2026-11-23" };
@@ -73,6 +74,7 @@ const buildPayment = (overrides: Partial<Parameters<typeof mapPayment>[0]> = {})
   refer_rec_neg: "0",
   payment_id: "pay-1",
   transaction_uid: "uid-1",
+  acq_name: "CIELO 1",
   card_code: 1,
   type_pay: 1,
   ...overrides
@@ -170,7 +172,7 @@ describe("loadMidias", () => {
 });
 
 describe("mapPayment", () => {
-  it("maps a complete payment to the 18 response fields", () => {
+  it("maps a complete payment to the 19 response fields", () => {
     const item = mapPayment(buildPayment(), brandMap, midiaMap);
 
     expect(Object.keys(item)).toEqual(RESPONSE_FIELDS);
@@ -192,7 +194,8 @@ describe("mapPayment", () => {
       auth_number: "123456",
       refer_rec_neg: "0",
       payment_id: "pay-1",
-      transaction_uid: "uid-1"
+      transaction_uid: "uid-1",
+      acq_name: "CIELO 1"
     });
   });
 
@@ -212,6 +215,7 @@ describe("mapPayment", () => {
         refer_rec_neg: null,
         payment_id: null,
         transaction_uid: null,
+        acq_name: null,
         card_code: null,
         type_pay: null
       }),
@@ -342,6 +346,7 @@ describe("getPaymentList", () => {
           refer_rec_neg: true,
           payment_id: true,
           transaction_uid: true,
+          acq_name: true,
           card_code: true,
           type_pay: true
         }

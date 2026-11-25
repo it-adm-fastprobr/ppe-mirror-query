@@ -23,6 +23,7 @@ const PAYMENT_SELECT = {
   refer_rec_neg: true,
   payment_id: true,
   transaction_uid: true,
+  acq_name: true,
   card_code: true,
   type_pay: true
 } satisfies Prisma.PaymentListSelect;
@@ -99,7 +100,8 @@ export const mapPayment = (
     auth_number: payment.auth_number,
     refer_rec_neg: payment.refer_rec_neg,
     payment_id: payment.payment_id,
-    transaction_uid: payment.transaction_uid
+    transaction_uid: payment.transaction_uid,
+    acq_name: payment.acq_name
   };
 };
 
