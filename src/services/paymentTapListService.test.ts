@@ -127,6 +127,15 @@ describe("findLocal", () => {
     expect(findLocal(LOCALS, "T-001", new Date(tapReceiv))).toBe(expected);
   });
 
+  it("treats a null final_date as an open record", () => {
+    const open = { ...LOCAL_B, final_date: null };
+
+    expect(findLocal([LOCAL_A, open], "T-001", new Date("2026-11-23T11:30:00.000Z"))).toBe(LOCAL_A);
+    expect(findLocal([LOCAL_A, open], "T-001", new Date("2026-11-23T11:30:00.001Z"))).toBe(open);
+    expect(findLocal([LOCAL_A, open], "T-001", new Date("2030-01-01T00:00:00.000Z"))).toBe(open);
+    expect(findLocal([open], "T-001", new Date("2026-11-23T11:30:00.000Z"))).toBeNull();
+  });
+
   it("returns null before the first record", () => {
     expect(findLocal(LOCALS, "T-001", new Date("2026-01-01T02:59:59.999Z"))).toBeNull();
   });
@@ -370,6 +379,21 @@ describe("getPaymentTapList", () => {
           { local_description: "ESTACAO A", group_desc: "001 - Grupo A", subgroup: "Modal A" },
           { local_description: "ESTACAO B", group_desc: "002 - Grupo B", subgroup: "Modal B" }
         ]
+      });
+    });
+
+    it("returns the local of an open record with null final_date", async () => {
+      mockTaps([
+        buildTap({ unique_id: "tap-a", tap_receiv: new Date("2026-11-23T11:00:00.000Z") }),
+        buildTap({ unique_id: "tap-b", tap_receiv: new Date("2026-11-23T11:59:00.000Z") })
+      ]);
+      mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValue([LOCAL_A, { ...LOCAL_B, final_date: null }]);
+
+      const result = await getPaymentTapList("uid-2");
+
+      expect(result).toMatchObject({
+        status: 200,
+        data: [{ local_description: "ESTACAO A" }, { local_description: "ESTACAO B" }]
       });
     });
 

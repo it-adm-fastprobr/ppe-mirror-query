@@ -84,7 +84,7 @@ model TerminalTreeHistorical {
   group_desc        String
   subgroup          String
   initial_date      String
-  final_date        String
+  final_date        String?
 
   @@map("terminal_tree_historical")
 }

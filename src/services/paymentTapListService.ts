@@ -64,7 +64,7 @@ export const findLocal = (
       (local) =>
         local.terminal_id === terminalId &&
         local.initial_date <= tapText &&
-        (local.final_date === OPEN_FINAL_DATE || local.final_date >= tapText)
+        (local.final_date === null || local.final_date === OPEN_FINAL_DATE || local.final_date >= tapText)
     )
     .reduce<LocalDbRecord | null>(
       (latest, local) => (latest === null || local.initial_date > latest.initial_date ? local : latest),
