@@ -1,3 +1,5 @@
+import { PaginationMeta } from "./paginationModel";
+
 export type PaymentTapListItem = {
   id: string;
   tap_receiv: string | null;
@@ -21,6 +23,19 @@ export type PaymentTapListItem = {
   app_name: string | null;
 };
 
+export type GetPaymentTapListInput = {
+  transactionUid?: string;
+  cardHash?: string;
+  tapReceivStart?: string;
+  tapReceivEnd?: string;
+  localDescription?: string;
+  groupDesc?: string;
+  subgroup?: string;
+  tapStatus?: string;
+  page?: string;
+  pageSize?: string;
+};
+
 export type GetPaymentTapListResult =
-  | { ok: true; status: 200; data: PaymentTapListItem[] }
-  | { ok: false; status: 404 | 500; error: string };
+  | { ok: true; status: 200; data: PaymentTapListItem[]; pagination: PaginationMeta }
+  | { ok: false; status: 400 | 404 | 500; error: string };

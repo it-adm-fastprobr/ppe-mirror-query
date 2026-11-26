@@ -1,7 +1,7 @@
 jest.mock("../utils/prisma", () => ({
   prisma: {
     tapPayList: { findMany: jest.fn() },
-    tapLog: { findMany: jest.fn() },
+    tapLog: { findMany: jest.fn(), count: jest.fn() },
     brandAidProp: { findMany: jest.fn() },
     typesPay: { findMany: jest.fn() },
     terminalTreeHistorical: { findMany: jest.fn() }
@@ -14,7 +14,7 @@ import { findLocal, getPaymentTapList, mapTap } from "./paymentTapListService";
 
 const mockedPrisma = prisma as unknown as {
   tapPayList: { findMany: jest.Mock };
-  tapLog: { findMany: jest.Mock };
+  tapLog: { findMany: jest.Mock; count: jest.Mock };
   brandAidProp: { findMany: jest.Mock };
   typesPay: { findMany: jest.Mock };
   terminalTreeHistorical: { findMany: jest.Mock };
@@ -87,10 +87,21 @@ const buildTap = (overrides: Partial<Parameters<typeof mapTap>[0]> = {}): Parame
 const brandMap = new Map<number | null, Brand>([[1, { brand: "VISA", brand_type: "CREDITO" }]]);
 const midiaMap = new Map<number | null, string>([[1, "CARD"]]);
 
-const mockTaps = (taps: ReturnType<typeof buildTap>[]) => {
+const mockTaps = (taps: ReturnType<typeof buildTap>[], total = taps.length) => {
   mockedPrisma.tapPayList.findMany.mockResolvedValue(taps.map(({ unique_id }) => ({ unique_id })));
   mockedPrisma.tapLog.findMany.mockResolvedValue(taps);
+  mockedPrisma.tapLog.count.mockResolvedValue(total);
 };
+
+const expectNoQueries = () => {
+  for (const model of Object.values(mockedPrisma)) {
+    for (const query of Object.values(model)) {
+      expect(query).not.toHaveBeenCalled();
+    }
+  }
+};
+
+const tapQuery = () => mockedPrisma.tapLog.findMany.mock.calls[0][0];
 
 let consoleError: jest.SpyInstance;
 
@@ -253,42 +264,156 @@ describe("mapTap", () => {
 });
 
 describe("getPaymentTapList", () => {
+  const TAP_SELECT = {
+    id: true,
+    tap_receiv: true,
+    tap_read: true,
+    sam: true,
+    serial_number: true,
+    unique_id: true,
+    card_hash: true,
+    pan_mask: true,
+    tap_status: true,
+    terminal_version: true,
+    app_priority: true,
+    app_data: true,
+    hash_aux: true,
+    app_name: true,
+    terminal_id: true,
+    card_code: true,
+    type_pay: true
+  };
+
+  const PERIOD_SELECT = { terminal_id: true, initial_date: true, final_date: true };
+
+  const PERIOD_A = {
+    terminal_id: "T-001",
+    tap_receiv: { gte: new Date("2026-01-01T03:00:00.000Z"), lte: new Date("2026-11-23T11:30:00.000Z") }
+  };
+
+  const PERIOD_B = { terminal_id: "T-001", tap_receiv: { gte: new Date("2026-11-23T11:30:00.001Z") } };
+
+  const FIRST_PAGE = { page: 1, pageSize: 50, total: 1, totalPages: 1 };
+
+  describe("validation", () => {
+    beforeEach(() => {
+      mockTaps([buildTap()]);
+    });
+
+    it.each([
+      ["an invalid start", { tapReceivStart: "abc" }, "tap_receiv_start and tap_receiv_end must be valid ISO dates."],
+      ["an invalid end", { tapReceivEnd: "2026-02-31" }, "tap_receiv_start and tap_receiv_end must be valid ISO dates."],
+      [
+        "an end before the start",
+        { tapReceivStart: "2026-11-23", tapReceivEnd: "2026-11-22" },
+        "tap_receiv_end must be greater than or equal to tap_receiv_start."
+      ]
+    ])("returns 400 for %s, without queries", async (_name, input, error) => {
+      expect(await getPaymentTapList(input)).toEqual({ ok: false, status: 400, error });
+      expectNoQueries();
+    });
+
+    it.each(["abc", "-1", "1.5", "1e3", "0x1", "2147483648"])(
+      "returns 400 for tap_status %p, without queries",
+      async (tapStatus) => {
+        expect(await getPaymentTapList({ tapStatus })).toEqual({
+          ok: false,
+          status: 400,
+          error: "tap_status must be a non-negative integer."
+        });
+        expectNoQueries();
+      }
+    );
+
+    it.each([
+      [{ page: "0" }, "page must be a positive integer."],
+      [{ page: "abc" }, "page must be a positive integer."],
+      [{ pageSize: "201" }, "pageSize must be an integer between 1 and 200."]
+    ])("returns 400 for the pagination %p, without queries", async (input, error) => {
+      expect(await getPaymentTapList(input)).toEqual({ ok: false, status: 400, error });
+      expectNoQueries();
+    });
+
+    it("validates the period first, then tap_status, then the pagination", async () => {
+      expect(await getPaymentTapList({ tapReceivStart: "abc", tapStatus: "abc", page: "0" })).toMatchObject({
+        error: "tap_receiv_start and tap_receiv_end must be valid ISO dates."
+      });
+      expect(await getPaymentTapList({ tapStatus: "abc", page: "0" })).toMatchObject({
+        error: "tap_status must be a non-negative integer."
+      });
+      expectNoQueries();
+    });
+  });
+
   describe("query", () => {
     beforeEach(() => {
       mockTaps([buildTap()]);
     });
 
-    it("searches the links by transaction_uid and the taps by unique_id, without ordering", async () => {
-      await getPaymentTapList("uid-1");
+    it("reads the first page of every tap in id DESC without filters", async () => {
+      await getPaymentTapList({});
+
+      expect(mockedPrisma.tapLog.findMany).toHaveBeenCalledTimes(1);
+      expect(mockedPrisma.tapLog.findMany).toHaveBeenCalledWith({
+        where: {},
+        orderBy: { id: "desc" },
+        skip: 0,
+        take: 50,
+        select: TAP_SELECT
+      });
+      expect(mockedPrisma.tapPayList.findMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledTimes(1);
+      expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0].where).toEqual({
+        terminal_id: { in: ["T-001"] }
+      });
+    });
+
+    it("counts with the same where of the page", async () => {
+      await getPaymentTapList({ cardHash: "abc", tapStatus: "0", tapReceivStart: "2026-11-23" });
+
+      expect(mockedPrisma.tapLog.count).toHaveBeenCalledTimes(1);
+      expect(mockedPrisma.tapLog.count).toHaveBeenCalledWith({ where: tapQuery().where });
+    });
+
+    it.each([
+      ["only the start", { tapReceivStart: "2026-11-23" }, { gte: new Date("2026-11-23T03:00:00.000Z") }],
+      ["only the end", { tapReceivEnd: "2026-11-23" }, { lte: new Date("2026-11-24T02:59:59.999Z") }],
+      [
+        "both limits",
+        { tapReceivStart: "2026-11-23T08:00:00", tapReceivEnd: "2026-11-23T12:00:00Z" },
+        { gte: new Date("2026-11-23T11:00:00.000Z"), lte: new Date("2026-11-23T12:00:00.000Z") }
+      ]
+    ])("filters tap_receiv with %s", async (_name, input, tapReceiv) => {
+      await getPaymentTapList(input);
+
+      expect(tapQuery().where).toStrictEqual({ tap_receiv: tapReceiv });
+    });
+
+    it("filters card_hash by the exact value", async () => {
+      await getPaymentTapList({ cardHash: "fedcba9876543210fedcba9876543210" });
+
+      expect(tapQuery().where).toStrictEqual({ card_hash: "fedcba9876543210fedcba9876543210" });
+    });
+
+    it.each([
+      ["0", 0],
+      ["255", 255],
+      ["2147483647", 2147483647]
+    ])("filters tap_status %p as the number %p", async (tapStatus, expected) => {
+      await getPaymentTapList({ tapStatus });
+
+      expect(tapQuery().where).toStrictEqual({ tap_status: expected });
+    });
+
+    it("filters by the unique_id of the links of transaction_uid", async () => {
+      await getPaymentTapList({ transactionUid: "uid-1" });
 
       expect(mockedPrisma.tapPayList.findMany).toHaveBeenCalledTimes(1);
       expect(mockedPrisma.tapPayList.findMany).toHaveBeenCalledWith({
         where: { transaction_uid: "uid-1" },
         select: { unique_id: true }
       });
-      expect(mockedPrisma.tapLog.findMany).toHaveBeenCalledTimes(1);
-      expect(mockedPrisma.tapLog.findMany).toHaveBeenCalledWith({
-        where: { unique_id: { in: ["tap-1"] } },
-        select: {
-          id: true,
-          tap_receiv: true,
-          tap_read: true,
-          sam: true,
-          serial_number: true,
-          unique_id: true,
-          card_hash: true,
-          pan_mask: true,
-          tap_status: true,
-          terminal_version: true,
-          app_priority: true,
-          app_data: true,
-          hash_aux: true,
-          app_name: true,
-          terminal_id: true,
-          card_code: true,
-          type_pay: true
-        }
-      });
+      expect(tapQuery().where).toStrictEqual({ unique_id: { in: ["tap-1"] } });
     });
 
     it("ignores links without unique_id and repeated links", async () => {
@@ -299,12 +424,66 @@ describe("getPaymentTapList", () => {
         { unique_id: "tap-2a" }
       ]);
 
-      await getPaymentTapList("uid-2");
+      await getPaymentTapList({ transactionUid: "uid-2" });
 
-      expect(mockedPrisma.tapLog.findMany.mock.calls[0][0].where).toEqual({ unique_id: { in: ["tap-2a", "tap-2b"] } });
+      expect(tapQuery().where).toEqual({ unique_id: { in: ["tap-2a", "tap-2b"] } });
     });
 
-    it("resolves the auxiliary fields in a single batch", async () => {
+    it.each([
+      ["local_description", { localDescription: "ESTACAO A" }, { local_description: "ESTACAO A" }],
+      ["group_desc", { groupDesc: "001 - Grupo A" }, { group_desc: "001 - Grupo A" }],
+      ["subgroup", { subgroup: "Modal A" }, { subgroup: "Modal A" }],
+      [
+        "the three local filters",
+        { localDescription: "ESTACAO A", groupDesc: "001 - Grupo A", subgroup: "Modal A" },
+        { local_description: "ESTACAO A", group_desc: "001 - Grupo A", subgroup: "Modal A" }
+      ]
+    ])("searches the validity records by %s only", async (_name, input, where) => {
+      await getPaymentTapList(input);
+
+      expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0]).toStrictEqual({
+        where,
+        select: PERIOD_SELECT
+      });
+    });
+
+    it("combines every filter", async () => {
+      await getPaymentTapList({
+        transactionUid: "uid-1",
+        cardHash: "abc",
+        tapReceivStart: "2026-11-23",
+        tapReceivEnd: "2026-11-23",
+        localDescription: "ESTACAO A",
+        groupDesc: "001 - Grupo A",
+        subgroup: "Modal A",
+        tapStatus: "0"
+      });
+
+      expect(mockedPrisma.tapPayList.findMany).toHaveBeenCalledTimes(1);
+      expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0].where).toStrictEqual({
+        local_description: "ESTACAO A",
+        group_desc: "001 - Grupo A",
+        subgroup: "Modal A"
+      });
+      expect(tapQuery().where).toStrictEqual({
+        tap_receiv: { gte: new Date("2026-11-23T03:00:00.000Z"), lte: new Date("2026-11-24T02:59:59.999Z") },
+        card_hash: "abc",
+        tap_status: 0,
+        unique_id: { in: ["tap-1"] },
+        OR: [PERIOD_A, PERIOD_B]
+      });
+    });
+
+    it("applies the requested page", async () => {
+      mockTaps([buildTap()], 25);
+
+      const result = await getPaymentTapList({ page: "2", pageSize: "10" });
+
+      expect(tapQuery()).toMatchObject({ skip: 10, take: 10 });
+      expect(result).toMatchObject({ pagination: { page: 2, pageSize: 10, total: 25, totalPages: 3 } });
+    });
+
+    it("resolves the auxiliary fields of the page in a single batch", async () => {
       mockTaps([
         buildTap({ unique_id: "tap-2a", card_code: 286, type_pay: 2 }),
         buildTap({ unique_id: "tap-2b", card_code: 286, type_pay: 2 }),
@@ -312,7 +491,7 @@ describe("getPaymentTapList", () => {
         buildTap({ unique_id: "tap-2d", card_code: null, type_pay: null, terminal_id: null })
       ]);
 
-      await getPaymentTapList("uid-2");
+      await getPaymentTapList({ transactionUid: "uid-2" });
 
       expect(mockedPrisma.brandAidProp.findMany).toHaveBeenCalledTimes(1);
       expect(mockedPrisma.brandAidProp.findMany.mock.calls[0][0].where).toEqual({ card_code: { in: [286, 1] } });
@@ -333,35 +512,122 @@ describe("getPaymentTapList", () => {
     });
   });
 
+  describe("local validity filter", () => {
+    const filterBy = async (records: unknown[]) => {
+      mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValueOnce(records);
+      return getPaymentTapList({ localDescription: "ESTACAO A" });
+    };
+
+    beforeEach(() => {
+      mockTaps([buildTap()]);
+    });
+
+    it("turns a closed record into a period with both limits converted from Brasilia", async () => {
+      await filterBy([LOCAL_A]);
+
+      expect(tapQuery().where).toStrictEqual({ OR: [PERIOD_A] });
+    });
+
+    it.each(["NULL", null])("turns an open record with final_date %p into a period without end", async (finalDate) => {
+      await filterBy([{ ...LOCAL_B, final_date: finalDate }]);
+
+      expect(tapQuery().where).toStrictEqual({ OR: [PERIOD_B] });
+    });
+
+    it("creates one period per record, for a terminal that moved and for several terminals", async () => {
+      const other = { ...LOCAL_A, terminal_id: "T-002", initial_date: "2026-06-01 12:00:00.000", final_date: "NULL" };
+
+      await filterBy([LOCAL_A, LOCAL_B, other]);
+
+      expect(tapQuery().where).toStrictEqual({
+        OR: [PERIOD_A, PERIOD_B, { terminal_id: "T-002", tap_receiv: { gte: new Date("2026-06-01T15:00:00.000Z") } }]
+      });
+    });
+
+    it.each([
+      ["initial_date", { ...LOCAL_A, initial_date: "01/01/2026" }],
+      ["final_date", { ...LOCAL_A, final_date: "abc" }]
+    ])("ignores a record with an invalid %s and keeps the others", async (_name, invalid) => {
+      await filterBy([invalid, LOCAL_B]);
+
+      expect(tapQuery().where).toStrictEqual({ OR: [PERIOD_B] });
+    });
+
+    it.each([
+      ["no record matches", []],
+      ["every record has an invalid date", [{ ...LOCAL_A, initial_date: "" }, { ...LOCAL_B, initial_date: "abc" }]]
+    ])("returns 404 without reading tap_log when %s", async (_name, records) => {
+      const result = await filterBy(records);
+
+      expect(result).toEqual({ ok: false, status: 404, error: "No taps found." });
+      expect(mockedPrisma.tapLog.count).not.toHaveBeenCalled();
+      expect(mockedPrisma.tapLog.findMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.brandAidProp.findMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.typesPay.findMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledTimes(1);
+      expect(consoleError).not.toHaveBeenCalled();
+    });
+
+    it("returns the same local used by the filter", async () => {
+      const result = await filterBy([LOCAL_A]);
+
+      expect(result).toMatchObject({
+        status: 200,
+        data: [{ local_description: "ESTACAO A", group_desc: "001 - Grupo A", subgroup: "Modal A" }]
+      });
+    });
+
+    it("reads terminal_tree_historical once to filter and once for the locals of the page", async () => {
+      mockTaps([buildTap(), buildTap({ unique_id: "tap-x", terminal_id: "T-002" })]);
+
+      await filterBy([LOCAL_A]);
+
+      expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledTimes(2);
+      expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[1][0].where).toEqual({
+        terminal_id: { in: ["T-001", "T-002"] }
+      });
+    });
+
+    it("runs the transaction_uid and the local queries", async () => {
+      await getPaymentTapList({ transactionUid: "uid-1", subgroup: "Modal A" });
+
+      expect(mockedPrisma.tapPayList.findMany).toHaveBeenCalledTimes(1);
+      expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0].where).toStrictEqual({ subgroup: "Modal A" });
+      expect(tapQuery().where).toStrictEqual({ unique_id: { in: ["tap-1"] }, OR: [PERIOD_A, PERIOD_B] });
+    });
+  });
+
   describe("result", () => {
-    it("returns the 20 fields of a transaction with one tap", async () => {
+    it("returns the 20 fields of each tap and the pagination", async () => {
       mockTaps([buildTap()]);
 
-      const result = await getPaymentTapList("uid-1");
+      const result = await getPaymentTapList({ transactionUid: "uid-1" });
 
       expect(result).toEqual({
         ok: true,
         status: 200,
-        data: [mapTap(buildTap(), brandMap, midiaMap, LOCALS)]
+        data: [mapTap(buildTap(), brandMap, midiaMap, LOCALS)],
+        pagination: FIRST_PAGE
       });
       expect(result.ok && Object.keys(result.data[0])).toEqual(RESPONSE_FIELDS);
       expect(consoleError).not.toHaveBeenCalled();
     });
 
-    it("returns every tap of a transaction with several, each with its own auxiliary fields", async () => {
+    it("returns every tap of the page, each with its own auxiliary fields", async () => {
       mockTaps([
         buildTap({ unique_id: "tap-2a", card_code: 286, type_pay: 2 }),
         buildTap({ unique_id: "tap-2b" })
       ]);
 
-      const result = await getPaymentTapList("uid-2");
+      const result = await getPaymentTapList({ transactionUid: "uid-2" });
 
       expect(result).toMatchObject({
         status: 200,
         data: [
           { unique_id: "tap-2a", brand: "MASTER", brand_type: "DEBITO", transaction_midia: "MOBILE" },
           { unique_id: "tap-2b", brand: "VISA", brand_type: "CREDITO", transaction_midia: "CARD" }
-        ]
+        ],
+        pagination: { page: 1, pageSize: 50, total: 2, totalPages: 1 }
       });
       expect(result.ok && result.data.map((item) => Object.keys(item))).toEqual([RESPONSE_FIELDS, RESPONSE_FIELDS]);
     });
@@ -372,7 +638,7 @@ describe("getPaymentTapList", () => {
         buildTap({ unique_id: "tap-b", tap_receiv: new Date("2026-11-23T11:59:00.000Z") })
       ]);
 
-      const result = await getPaymentTapList("uid-2");
+      const result = await getPaymentTapList({});
 
       expect(result).toMatchObject({
         data: [
@@ -389,7 +655,7 @@ describe("getPaymentTapList", () => {
       ]);
       mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValue([LOCAL_A, { ...LOCAL_B, final_date: null }]);
 
-      const result = await getPaymentTapList("uid-2");
+      const result = await getPaymentTapList({});
 
       expect(result).toMatchObject({
         status: 200,
@@ -401,7 +667,7 @@ describe("getPaymentTapList", () => {
       mockTaps([buildTap({ terminal_id: "T-999" })]);
       mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValue([]);
 
-      const result = await getPaymentTapList("uid-3");
+      const result = await getPaymentTapList({ transactionUid: "uid-3" });
 
       expect(result).toMatchObject({
         status: 200,
@@ -413,24 +679,38 @@ describe("getPaymentTapList", () => {
       mockTaps([buildTap({ unique_id: "tap-7", sam: null, tap_receiv: null })]);
       mockedPrisma.tapPayList.findMany.mockResolvedValue([{ unique_id: "tap-7" }, { unique_id: null }]);
 
-      const result = await getPaymentTapList("uid-7");
+      const result = await getPaymentTapList({ transactionUid: "uid-7" });
 
-      expect(mockedPrisma.tapLog.findMany.mock.calls[0][0].where).toEqual({ unique_id: { in: ["tap-7"] } });
+      expect(tapQuery().where).toEqual({ unique_id: { in: ["tap-7"] } });
       expect(result).toMatchObject({
         status: 200,
         data: [{ sam: null, tap_receiv: null, local_description: null, group_desc: null, subgroup: null }]
       });
     });
 
-    it.each([
-      ["the transaction has no links", []],
-      ["the links have no unique_id", [{ unique_id: null }]],
-      ["the linked taps are not in tap_log", [{ unique_id: "tap-x" }]]
-    ])("returns 404 when %s, without loading the auxiliary fields", async (_name, links) => {
-      mockedPrisma.tapPayList.findMany.mockResolvedValue(links);
-      mockedPrisma.tapLog.findMany.mockResolvedValue([]);
+    it("returns 200 with an empty page after the last one", async () => {
+      mockTaps([], 3);
 
-      const result = await getPaymentTapList("uid-inexistente");
+      const result = await getPaymentTapList({ page: "2", pageSize: "10" });
+
+      expect(result).toEqual({
+        ok: true,
+        status: 200,
+        data: [],
+        pagination: { page: 2, pageSize: 10, total: 3, totalPages: 1 }
+      });
+    });
+
+    it.each([
+      ["there are no taps", {}, []],
+      ["the transaction has no links", { transactionUid: "uid-inexistente" }, []],
+      ["the links have no unique_id", { transactionUid: "uid-inexistente" }, [{ unique_id: null }]],
+      ["the linked taps are not in tap_log", { transactionUid: "uid-inexistente" }, [{ unique_id: "tap-x" }]]
+    ])("returns 404 when %s, without loading the auxiliary fields", async (_name, input, links) => {
+      mockTaps([], 0);
+      mockedPrisma.tapPayList.findMany.mockResolvedValue(links);
+
+      const result = await getPaymentTapList(input);
 
       expect(result).toEqual({ ok: false, status: 404, error: "No taps found." });
       expect(mockedPrisma.brandAidProp.findMany).not.toHaveBeenCalled();
@@ -438,22 +718,39 @@ describe("getPaymentTapList", () => {
       expect(mockedPrisma.terminalTreeHistorical.findMany).not.toHaveBeenCalled();
       expect(consoleError).not.toHaveBeenCalled();
     });
+
+    it("searches an empty list of unique_id when the transaction has no links", async () => {
+      mockTaps([], 0);
+
+      await getPaymentTapList({ transactionUid: "uid-inexistente" });
+
+      expect(tapQuery().where).toStrictEqual({ unique_id: { in: [] } });
+    });
   });
 
   describe("internal error", () => {
-    it.each(["tapPayList", "tapLog", "brandAidProp", "typesPay", "terminalTreeHistorical"] as const)(
-      "returns 500 and logs the cause when %s fails",
-      async (model) => {
-        const failure = new Error("mongodb://user:secret@host is unreachable");
-        mockTaps([buildTap()]);
-        mockedPrisma[model].findMany.mockRejectedValue(failure);
+    const failure = new Error("mongodb://user:secret@host is unreachable");
 
-        const result = await getPaymentTapList("uid-1");
+    it.each<[string, () => void]>([
+      ["tapPayList", () => mockedPrisma.tapPayList.findMany.mockRejectedValue(failure)],
+      ["the local filter", () => mockedPrisma.terminalTreeHistorical.findMany.mockRejectedValueOnce(failure)],
+      ["tapLog.count", () => mockedPrisma.tapLog.count.mockRejectedValue(failure)],
+      ["tapLog.findMany", () => mockedPrisma.tapLog.findMany.mockRejectedValue(failure)],
+      ["brandAidProp", () => mockedPrisma.brandAidProp.findMany.mockRejectedValue(failure)],
+      ["typesPay", () => mockedPrisma.typesPay.findMany.mockRejectedValue(failure)],
+      [
+        "the locals of the page",
+        () => mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValueOnce(LOCALS).mockRejectedValueOnce(failure)
+      ]
+    ])("returns 500 and logs the cause when %s fails", async (_name, fail) => {
+      mockTaps([buildTap()]);
+      fail();
 
-        expect(result).toEqual({ ok: false, status: 500, error: "Internal error while fetching payment tap list." });
-        expect(consoleError).toHaveBeenCalledTimes(1);
-        expect(consoleError).toHaveBeenCalledWith("getPaymentTapList failed:", failure);
-      }
-    );
+      const result = await getPaymentTapList({ transactionUid: "uid-1", localDescription: "ESTACAO A" });
+
+      expect(result).toEqual({ ok: false, status: 500, error: "Internal error while fetching payment tap list." });
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith("getPaymentTapList failed:", failure);
+    });
   });
 });

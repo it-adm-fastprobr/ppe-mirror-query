@@ -2,7 +2,7 @@ jest.mock("./utils/prisma", () => ({
   prisma: {
     paymentList: { findMany: jest.fn(), count: jest.fn() },
     tapPayList: { findMany: jest.fn() },
-    tapLog: { findMany: jest.fn() },
+    tapLog: { findMany: jest.fn(), count: jest.fn() },
     brandAidProp: { findMany: jest.fn() },
     typesPay: { findMany: jest.fn() },
     terminalTreeHistorical: { findMany: jest.fn() }
@@ -18,7 +18,7 @@ import { prisma } from "./utils/prisma";
 const mockedPrisma = prisma as unknown as {
   paymentList: { findMany: jest.Mock; count: jest.Mock };
   tapPayList: { findMany: jest.Mock };
-  tapLog: { findMany: jest.Mock };
+  tapLog: { findMany: jest.Mock; count: jest.Mock };
   brandAidProp: { findMany: jest.Mock };
   typesPay: { findMany: jest.Mock };
   terminalTreeHistorical: { findMany: jest.Mock };
@@ -71,6 +71,43 @@ const tap = {
   type_pay: 1
 };
 
+const findsTap = (where: { unique_id?: { in: string[] } }): boolean =>
+  where.unique_id === undefined || where.unique_id.in.includes("tap-3");
+
+const local = {
+  terminal_id: "T-001",
+  local_description: "ESTACAO A",
+  group_desc: "001 - Grupo A",
+  subgroup: "Modal A",
+  initial_date: "2026-01-01 00:00:00.000",
+  final_date: "NULL"
+};
+
+const TAP_ITEM = {
+  id: "6b04748f28660a52fb7c0002",
+  tap_receiv: "2026-11-23T11:00:00.000Z",
+  tap_read: "2026-11-23T11:00:00.000Z",
+  sam: "0000000001",
+  local_description: null,
+  group_desc: null,
+  subgroup: null,
+  serial_number: "SN-0001",
+  unique_id: "tap-3",
+  card_hash: "0123456789abcdef0123456789abcdef",
+  pan_mask: "400000******0002",
+  brand_type: "CREDITO",
+  brand: "VISA",
+  transaction_midia: "CARD",
+  tap_status: 0,
+  terminal_version: "1.0",
+  app_priority: 1,
+  app_data: { direction: 0, route: "001" },
+  hash_aux: "",
+  app_name: "APP_EXEMPLO"
+};
+
+const FIRST_PAGE = { page: 1, pageSize: 50, total: 1, totalPages: 1 };
+
 let server: Server;
 let baseUrl: string;
 let consoleError: jest.SpyInstance;
@@ -120,9 +157,8 @@ beforeEach(() => {
   mockedPrisma.tapPayList.findMany.mockImplementation(async ({ where }) =>
     where.transaction_uid === "uid-3" ? [{ unique_id: "tap-3" }] : []
   );
-  mockedPrisma.tapLog.findMany.mockImplementation(async ({ where }) =>
-    where.unique_id.in.includes("tap-3") ? [tap] : []
-  );
+  mockedPrisma.tapLog.findMany.mockImplementation(async ({ where }) => (findsTap(where) ? [tap] : []));
+  mockedPrisma.tapLog.count.mockImplementation(async ({ where }) => (findsTap(where) ? 1 : 0));
   mockedPrisma.brandAidProp.findMany.mockResolvedValue([{ card_code: 1, brand: "VISA", brand_type: "CREDITO" }]);
   mockedPrisma.typesPay.findMany.mockResolvedValue([{ type_pay: 1, transaction_midia: "CARD" }]);
   mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValue([]);
@@ -273,54 +309,108 @@ describe("GET /api/payment-list", () => {
 });
 
 describe("GET /api/payment-tap-list", () => {
-  it("returns 200 with data", async () => {
-    const { status, body } = await requestJson(`${PAYMENT_TAP_LIST}?transaction_uid=uid-3`);
+  it.each(["", "?transaction_uid=", "?transaction_uid=%20%20"])(
+    "returns 200 with data and pagination without filters: %p",
+    async (query) => {
+      expect(await requestJson(`${PAYMENT_TAP_LIST}${query}`)).toEqual({
+        status: 200,
+        body: { data: [TAP_ITEM], pagination: FIRST_PAGE }
+      });
+      expect(mockedPrisma.tapPayList.findMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.tapLog.findMany.mock.calls[0][0].where).toEqual({});
+    }
+  );
 
-    expect(status).toBe(200);
-    expect(body).toEqual({
-      data: [
-        {
-          id: "6b04748f28660a52fb7c0002",
-          tap_receiv: "2026-11-23T11:00:00.000Z",
-          tap_read: "2026-11-23T11:00:00.000Z",
-          sam: "0000000001",
-          local_description: null,
-          group_desc: null,
-          subgroup: null,
-          serial_number: "SN-0001",
-          unique_id: "tap-3",
-          card_hash: "0123456789abcdef0123456789abcdef",
-          pan_mask: "400000******0002",
-          brand_type: "CREDITO",
-          brand: "VISA",
-          transaction_midia: "CARD",
-          tap_status: 0,
-          terminal_version: "1.0",
-          app_priority: 1,
-          app_data: { direction: 0, route: "001" },
-          hash_aux: "",
-          app_name: "APP_EXEMPLO"
-        }
-      ]
+  it("returns 200 with data and pagination for a transaction_uid", async () => {
+    expect(await requestJson(`${PAYMENT_TAP_LIST}?transaction_uid=uid-3`)).toEqual({
+      status: 200,
+      body: { data: [TAP_ITEM], pagination: FIRST_PAGE }
     });
   });
 
-  it.each(["", "?transaction_uid=", "?transaction_uid=uid-1&transaction_uid=uid-2"])(
-    "returns 400 for %p",
-    async (query) => {
-      expect(await requestJson(`${PAYMENT_TAP_LIST}${query}`)).toEqual({
-        status: 400,
-        body: { error: "Provide transaction_uid only once." }
-      });
-      expectNoQueries();
-    }
-  );
+  it("applies the parameters of the query string", async () => {
+    mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValueOnce([local]);
+
+    const { status } = await requestJson(
+      `${PAYMENT_TAP_LIST}?transaction_uid=uid-3&card_hash=abc` +
+        "&tap_receiv_start=2026-11-23T08:00:00-03:00" +
+        `&tap_receiv_end=${encodeURIComponent("2026-11-23T12:00:00+01:00")}` +
+        `&local_description=${encodeURIComponent("ESTACAO A")}` +
+        `&group_desc=${encodeURIComponent("001 - Grupo A")}` +
+        `&subgroup=${encodeURIComponent("Modal A")}` +
+        "&tap_status=255&page=2&pageSize=10"
+    );
+
+    expect(status).toBe(200);
+    expect(mockedPrisma.tapPayList.findMany.mock.calls[0][0].where).toEqual({ transaction_uid: "uid-3" });
+    expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0].where).toEqual({
+      local_description: "ESTACAO A",
+      group_desc: "001 - Grupo A",
+      subgroup: "Modal A"
+    });
+    expect(mockedPrisma.tapLog.findMany.mock.calls[0][0]).toMatchObject({
+      where: {
+        tap_receiv: { gte: new Date("2026-11-23T11:00:00.000Z"), lte: new Date("2026-11-23T11:00:00.000Z") },
+        card_hash: "abc",
+        tap_status: 255,
+        unique_id: { in: ["tap-3"] },
+        OR: [{ terminal_id: "T-001", tap_receiv: { gte: new Date("2026-01-01T03:00:00.000Z") } }]
+      },
+      orderBy: { id: "desc" },
+      skip: 10,
+      take: 10
+    });
+  });
+
+  it.each([
+    "transaction_uid",
+    "card_hash",
+    "tap_receiv_start",
+    "tap_receiv_end",
+    "local_description",
+    "group_desc",
+    "subgroup",
+    "tap_status",
+    "page",
+    "pageSize"
+  ])("returns 400 when %s is repeated in the query string", async (name) => {
+    expect(await requestJson(`${PAYMENT_TAP_LIST}?${name}=1&${name}=2`)).toEqual({
+      status: 400,
+      body: { error: `${name} must be provided only once.` }
+    });
+    expectNoQueries();
+  });
+
+  it.each([
+    ["?tap_receiv_start=2026-02-31", "tap_receiv_start and tap_receiv_end must be valid ISO dates."],
+    ["?tap_receiv_end=23/11/2026", "tap_receiv_start and tap_receiv_end must be valid ISO dates."],
+    [
+      "?tap_receiv_start=2026-11-23&tap_receiv_end=2026-11-22",
+      "tap_receiv_end must be greater than or equal to tap_receiv_start."
+    ],
+    ["?tap_status=abc", "tap_status must be a non-negative integer."],
+    ["?tap_status=-1", "tap_status must be a non-negative integer."],
+    ["?page=0", "page must be a positive integer."],
+    ["?pageSize=201", "pageSize must be an integer between 1 and 200."]
+  ])("returns 400 for %p", async (query, error) => {
+    expect(await requestJson(`${PAYMENT_TAP_LIST}${query}`)).toEqual({ status: 400, body: { error } });
+    expectNoQueries();
+  });
 
   it("returns 404 for an unknown transaction_uid", async () => {
     expect(await requestJson(`${PAYMENT_TAP_LIST}?transaction_uid=uid-inexistente`)).toEqual({
       status: 404,
       body: { error: "No taps found." }
     });
+  });
+
+  it("returns 404 for an unknown local, without reading tap_log", async () => {
+    expect(await requestJson(`${PAYMENT_TAP_LIST}?local_description=INEXISTENTE`)).toEqual({
+      status: 404,
+      body: { error: "No taps found." }
+    });
+    expect(mockedPrisma.tapLog.count).not.toHaveBeenCalled();
+    expect(mockedPrisma.tapLog.findMany).not.toHaveBeenCalled();
   });
 
   it("returns 404 for a REC and 200 for its refer_rec_neg", async () => {

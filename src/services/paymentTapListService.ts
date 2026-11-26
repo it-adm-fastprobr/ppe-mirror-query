@@ -1,11 +1,19 @@
 import { Prisma } from "@prisma/client";
 
-import { Brand, GetPaymentTapListResult, PaymentTapListItem } from "../models";
-import { toBrasiliaText } from "../utils/dateRange";
+import { Brand, GetPaymentTapListInput, GetPaymentTapListResult, PaymentTapListItem } from "../models";
+import { fromBrasiliaText, parseAndValidateDateRange, toBrasiliaText } from "../utils/dateRange";
+import { buildPaginationMeta, parseAndValidatePagination } from "../utils/pagination";
 import { prisma } from "../utils/prisma";
 import { loadBrands, loadMidias } from "./paymentListService";
 
 const OPEN_FINAL_DATE = "NULL";
+
+const TAP_RECEIV = { start: "tap_receiv_start", end: "tap_receiv_end" };
+
+const NON_NEGATIVE_INTEGER_REGEX = /^\d+$/;
+
+// tap_status é Int no schema; acima disso o Prisma recusa o filtro com erro interno.
+const MAX_INT32 = 2_147_483_647;
 
 const TAP_SELECT = {
   id: true,
@@ -38,6 +46,8 @@ const LOCAL_SELECT = {
 
 type TapDbRecord = Prisma.TapLogGetPayload<{ select: typeof TAP_SELECT }>;
 type LocalDbRecord = Prisma.TerminalTreeHistoricalGetPayload<{ select: typeof LOCAL_SELECT }>;
+
+type LocalFilter = Pick<Prisma.TerminalTreeHistoricalWhereInput, "local_description" | "group_desc" | "subgroup">;
 
 const distinctTexts = (values: (string | null)[]): string[] =>
   [...new Set(values)].filter((value): value is string => value !== null);
@@ -105,19 +115,107 @@ export const mapTap = (
   };
 };
 
-export const getPaymentTapList = async (transactionUid: string): Promise<GetPaymentTapListResult> => {
+const findUniqueIds = async (transactionUid: string): Promise<string[]> => {
+  const links = await prisma.tapPayList.findMany({
+    where: { transaction_uid: transactionUid },
+    select: { unique_id: true }
+  });
+
+  return distinctTexts(links.map(({ unique_id }) => unique_id));
+};
+
+// Cada registro de vigência vira um período de tap_receiv do terminal, com os limites inclusivos do findLocal.
+const findLocalPeriods = async (filter: LocalFilter): Promise<Prisma.TapLogWhereInput[]> => {
+  const locals = await prisma.terminalTreeHistorical.findMany({
+    where: filter,
+    select: { terminal_id: true, initial_date: true, final_date: true }
+  });
+
+  return locals.flatMap(({ terminal_id, initial_date, final_date }) => {
+    const start = fromBrasiliaText(initial_date);
+    const end = final_date === null || final_date === OPEN_FINAL_DATE ? undefined : fromBrasiliaText(final_date);
+
+    if (!start || end === null) {
+      return [];
+    }
+
+    return [{ terminal_id, tap_receiv: { gte: start, ...(end ? { lte: end } : {}) } }];
+  });
+};
+
+const parseTapStatus = (value: string): number | null => {
+  const parsed = NON_NEGATIVE_INTEGER_REGEX.test(value) ? Number(value) : NaN;
+  return parsed <= MAX_INT32 ? parsed : null;
+};
+
+export const getPaymentTapList = async ({
+  transactionUid,
+  cardHash,
+  tapReceivStart,
+  tapReceivEnd,
+  localDescription,
+  groupDesc,
+  subgroup,
+  tapStatus,
+  page,
+  pageSize
+}: GetPaymentTapListInput): Promise<GetPaymentTapListResult> => {
+  const range = parseAndValidateDateRange(tapReceivStart, tapReceivEnd, TAP_RECEIV);
+
+  if (!range.ok) {
+    return { ok: false, status: 400, error: range.error };
+  }
+
+  const status = tapStatus === undefined ? undefined : parseTapStatus(tapStatus);
+
+  if (status === null) {
+    return { ok: false, status: 400, error: "tap_status must be a non-negative integer." };
+  }
+
+  const pagination = parseAndValidatePagination(page, pageSize);
+
+  if (!pagination.ok) {
+    return { ok: false, status: 400, error: pagination.error };
+  }
+
+  const localFilter: LocalFilter = {
+    ...(localDescription ? { local_description: localDescription } : {}),
+    ...(groupDesc ? { group_desc: groupDesc } : {}),
+    ...(subgroup ? { subgroup } : {})
+  };
+
   try {
-    const links = await prisma.tapPayList.findMany({
-      where: { transaction_uid: transactionUid },
-      select: { unique_id: true }
-    });
+    const [uniqueIds, localPeriods] = await Promise.all([
+      transactionUid ? findUniqueIds(transactionUid) : undefined,
+      Object.keys(localFilter).length > 0 ? findLocalPeriods(localFilter) : undefined
+    ]);
 
-    const taps = await prisma.tapLog.findMany({
-      where: { unique_id: { in: distinctTexts(links.map(({ unique_id }) => unique_id)) } },
-      select: TAP_SELECT
-    });
+    if (localPeriods?.length === 0) {
+      return { ok: false, status: 404, error: "No taps found." };
+    }
 
-    if (taps.length === 0) {
+    const where: Prisma.TapLogWhereInput = {
+      ...(range.start || range.end
+        ? { tap_receiv: { ...(range.start ? { gte: range.start } : {}), ...(range.end ? { lte: range.end } : {}) } }
+        : {}),
+      ...(cardHash ? { card_hash: cardHash } : {}),
+      ...(status !== undefined ? { tap_status: status } : {}),
+      ...(uniqueIds ? { unique_id: { in: uniqueIds } } : {}),
+      ...(localPeriods ? { OR: localPeriods } : {})
+    };
+
+    const [total, taps] = await Promise.all([
+      prisma.tapLog.count({ where }),
+      prisma.tapLog.findMany({
+        where,
+        orderBy: { id: "desc" },
+        skip: pagination.skip,
+        take: pagination.take,
+        select: TAP_SELECT
+      })
+    ]);
+
+    if (total === 0) {
       return { ok: false, status: 404, error: "No taps found." };
     }
 
@@ -127,7 +225,12 @@ export const getPaymentTapList = async (transactionUid: string): Promise<GetPaym
       loadLocals(taps.map(({ terminal_id }) => terminal_id))
     ]);
 
-    return { ok: true, status: 200, data: taps.map((tap) => mapTap(tap, brands, midias, locals)) };
+    return {
+      ok: true,
+      status: 200,
+      data: taps.map((tap) => mapTap(tap, brands, midias, locals)),
+      pagination: buildPaginationMeta(pagination.page, pagination.pageSize, total)
+    };
   } catch (error) {
     console.error("getPaymentTapList failed:", error);
     return { ok: false, status: 500, error: "Internal error while fetching payment tap list." };

@@ -7,6 +7,8 @@ import { prisma } from "../utils/prisma";
 
 const PAN_MASK_LENGTH = 20;
 
+const PAYMENT_TIME = { start: "payment_time_start", end: "payment_time_end" };
+
 const PAYMENT_SELECT = {
   id: true,
   response_code: true,
@@ -115,7 +117,7 @@ export const getPaymentList = async ({
   page,
   pageSize
 }: GetPaymentListInput): Promise<GetPaymentListResult> => {
-  const range = parseAndValidateDateRange(paymentTimeStart, paymentTimeEnd);
+  const range = parseAndValidateDateRange(paymentTimeStart, paymentTimeEnd, PAYMENT_TIME);
 
   if (!range.ok) {
     return { ok: false, status: 400, error: range.error };
