@@ -4,7 +4,7 @@ import { Brand, GetPaymentTapListInput, GetPaymentTapListResult, PaymentTapListI
 import { fromBrasiliaText, parseAndValidateDateRange, toBrasiliaText } from "../utils/dateRange";
 import { buildPaginationMeta, parseAndValidatePagination } from "../utils/pagination";
 import { prisma } from "../utils/prisma";
-import { loadBrands, loadMidias } from "./paymentListService";
+import { loadBrands, loadMidias, toText } from "./paymentListService";
 
 const OPEN_FINAL_DATE = "NULL";
 
@@ -47,22 +47,36 @@ const LOCAL_SELECT = {
 type TapDbRecord = Prisma.TapLogGetPayload<{ select: typeof TAP_SELECT }>;
 type LocalDbRecord = Prisma.TerminalTreeHistoricalGetPayload<{ select: typeof LOCAL_SELECT }>;
 
+// terminal_id em texto, como em tap_log. Em terminal_tree_historical ele pode estar gravado como número.
+export type Local = Omit<LocalDbRecord, "terminal_id"> & { terminal_id: string | null };
+
 type LocalFilter = Pick<Prisma.TerminalTreeHistoricalWhereInput, "local_description" | "group_desc" | "subgroup">;
 
 const distinctTexts = (values: (string | null)[]): string[] =>
   [...new Set(values)].filter((value): value is string => value !== null);
 
-const loadLocals = async (terminalIds: (string | null)[]): Promise<LocalDbRecord[]> =>
-  prisma.terminalTreeHistorical.findMany({
-    where: { terminal_id: { in: distinctTexts(terminalIds) } },
+// "10" também é procurado como o número 10; "010" e "T-001" só como texto.
+export const terminalIdForms = (terminalId: string): Prisma.InputJsonValue[] => {
+  const numeric = Number(terminalId);
+  return /^\d+$/.test(terminalId) && String(numeric) === terminalId ? [terminalId, numeric] : [terminalId];
+};
+
+const loadLocals = async (terminalIds: (string | null)[]): Promise<Local[]> => {
+  const forms = distinctTexts(terminalIds).flatMap(terminalIdForms);
+
+  if (forms.length === 0) {
+    return [];
+  }
+
+  const records = await prisma.terminalTreeHistorical.findMany({
+    where: { OR: forms.map((form) => ({ terminal_id: { equals: form } })) },
     select: LOCAL_SELECT
   });
 
-export const findLocal = (
-  locals: LocalDbRecord[],
-  terminalId: string | null,
-  tapReceiv: Date | null
-): LocalDbRecord | null => {
+  return records.map((record) => ({ ...record, terminal_id: toText(record.terminal_id) }));
+};
+
+export const findLocal = (locals: Local[], terminalId: string | null, tapReceiv: Date | null): Local | null => {
   if (!tapReceiv) {
     return null;
   }
@@ -76,7 +90,7 @@ export const findLocal = (
         local.initial_date <= tapText &&
         (local.final_date === null || local.final_date === OPEN_FINAL_DATE || local.final_date >= tapText)
     )
-    .reduce<LocalDbRecord | null>(
+    .reduce<Local | null>(
       (latest, local) => (latest === null || local.initial_date > latest.initial_date ? local : latest),
       null
     );
@@ -86,7 +100,7 @@ export const mapTap = (
   tap: TapDbRecord,
   brands: Map<number | null, Brand>,
   midias: Map<number | null, string>,
-  locals: LocalDbRecord[]
+  locals: Local[]
 ): PaymentTapListItem => {
   const brand = brands.get(tap.card_code);
   const local = findLocal(locals, tap.terminal_id, tap.tap_receiv);
@@ -132,14 +146,15 @@ const findLocalPeriods = async (filter: LocalFilter): Promise<Prisma.TapLogWhere
   });
 
   return locals.flatMap(({ terminal_id, initial_date, final_date }) => {
+    const terminalId = toText(terminal_id);
     const start = fromBrasiliaText(initial_date);
     const end = final_date === null || final_date === OPEN_FINAL_DATE ? undefined : fromBrasiliaText(final_date);
 
-    if (!start || end === null) {
+    if (terminalId === null || !start || end === null) {
       return [];
     }
 
-    return [{ terminal_id, tap_receiv: { gte: start, ...(end ? { lte: end } : {}) } }];
+    return [{ terminal_id: terminalId, tap_receiv: { gte: start, ...(end ? { lte: end } : {}) } }];
   });
 };
 

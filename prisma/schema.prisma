@@ -79,7 +79,7 @@ model TypesPay {
 
 model TerminalTreeHistorical {
   id                String @id @map("_id") @db.ObjectId
-  terminal_id       String
+  terminal_id       Json?
   local_description String
   group_desc        String
   subgroup          String

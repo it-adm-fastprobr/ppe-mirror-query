@@ -10,7 +10,7 @@ jest.mock("../utils/prisma", () => ({
 
 import { Brand } from "../models";
 import { prisma } from "../utils/prisma";
-import { findLocal, getPaymentTapList, mapTap } from "./paymentTapListService";
+import { findLocal, getPaymentTapList, mapTap, terminalIdForms } from "./paymentTapListService";
 
 const mockedPrisma = prisma as unknown as {
   tapPayList: { findMany: jest.Mock };
@@ -263,6 +263,20 @@ describe("mapTap", () => {
   });
 });
 
+describe("terminalIdForms", () => {
+  it.each([
+    ["10", ["10", 10]],
+    ["0", ["0", 0]],
+    ["2147483648", ["2147483648", 2147483648]]
+  ])("searches %p as text and as number", (terminalId, expected) => {
+    expect(terminalIdForms(terminalId)).toEqual(expected);
+  });
+
+  it.each(["T-001", "010", "10.5", "-1", "1e3", " 10", "99999999999999999999"])("searches %p only as text", (terminalId) => {
+    expect(terminalIdForms(terminalId)).toEqual([terminalId]);
+  });
+});
+
 describe("getPaymentTapList", () => {
   const TAP_SELECT = {
     id: true,
@@ -364,7 +378,7 @@ describe("getPaymentTapList", () => {
       expect(mockedPrisma.tapPayList.findMany).not.toHaveBeenCalled();
       expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledTimes(1);
       expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0].where).toEqual({
-        terminal_id: { in: ["T-001"] }
+        OR: [{ terminal_id: { equals: "T-001" } }]
       });
     });
 
@@ -499,7 +513,7 @@ describe("getPaymentTapList", () => {
       expect(mockedPrisma.typesPay.findMany.mock.calls[0][0].where).toEqual({ type_pay: { in: [2, 1] } });
       expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledTimes(1);
       expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledWith({
-        where: { terminal_id: { in: ["T-001", "T-002"] } },
+        where: { OR: [{ terminal_id: { equals: "T-001" } }, { terminal_id: { equals: "T-002" } }] },
         select: {
           terminal_id: true,
           local_description: true,
@@ -509,6 +523,37 @@ describe("getPaymentTapList", () => {
           final_date: true
         }
       });
+    });
+
+    it("searches the locals of a numeric terminal_id as text and as number", async () => {
+      mockTaps([
+        buildTap({ unique_id: "tap-10", terminal_id: "10" }),
+        buildTap({ unique_id: "tap-t1", terminal_id: "T-001" }),
+        buildTap({ unique_id: "tap-010", terminal_id: "010" })
+      ]);
+
+      await getPaymentTapList({});
+
+      expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[0][0].where).toStrictEqual({
+        OR: [
+          { terminal_id: { equals: "10" } },
+          { terminal_id: { equals: 10 } },
+          { terminal_id: { equals: "T-001" } },
+          { terminal_id: { equals: "010" } }
+        ]
+      });
+    });
+
+    it.each([
+      ["no tap of the page has terminal_id", [buildTap({ terminal_id: null })], 1],
+      ["the page is empty", [], 3]
+    ])("does not read the locals when %s", async (_name, taps, total) => {
+      mockTaps(taps, total);
+
+      const result = await getPaymentTapList({ page: total > taps.length ? "2" : "1" });
+
+      expect(result.ok).toBe(true);
+      expect(mockedPrisma.terminalTreeHistorical.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -584,7 +629,40 @@ describe("getPaymentTapList", () => {
 
       expect(mockedPrisma.terminalTreeHistorical.findMany).toHaveBeenCalledTimes(2);
       expect(mockedPrisma.terminalTreeHistorical.findMany.mock.calls[1][0].where).toEqual({
-        terminal_id: { in: ["T-001", "T-002"] }
+        OR: [{ terminal_id: { equals: "T-001" } }, { terminal_id: { equals: "T-002" } }]
+      });
+    });
+
+    it("turns the numeric terminal_id of a record into text in the period", async () => {
+      await filterBy([{ ...LOCAL_A, terminal_id: 10 }]);
+
+      expect(tapQuery().where).toStrictEqual({ OR: [{ ...PERIOD_A, terminal_id: "10" }] });
+    });
+
+    it("ignores a record without terminal_id and keeps the others", async () => {
+      await filterBy([{ ...LOCAL_A, terminal_id: null }, LOCAL_B]);
+
+      expect(tapQuery().where).toStrictEqual({ OR: [PERIOD_B] });
+    });
+
+    it("returns 404 without reading tap_log when every record lacks terminal_id", async () => {
+      const result = await filterBy([{ ...LOCAL_A, terminal_id: null }]);
+
+      expect(result).toEqual({ ok: false, status: 404, error: "No taps found." });
+      expect(mockedPrisma.tapLog.findMany).not.toHaveBeenCalled();
+    });
+
+    it("returns the local of a numeric terminal_id used by the filter", async () => {
+      const numeric = { ...LOCAL_A, terminal_id: 10 };
+      mockTaps([buildTap({ terminal_id: "10" })]);
+      mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValueOnce([numeric]).mockResolvedValueOnce([numeric]);
+
+      const result = await getPaymentTapList({ localDescription: "ESTACAO A" });
+
+      expect(tapQuery().where).toStrictEqual({ OR: [{ ...PERIOD_A, terminal_id: "10" }] });
+      expect(result).toMatchObject({
+        status: 200,
+        data: [{ local_description: "ESTACAO A", group_desc: "001 - Grupo A", subgroup: "Modal A" }]
       });
     });
 
@@ -661,6 +739,27 @@ describe("getPaymentTapList", () => {
         status: 200,
         data: [{ local_description: "ESTACAO A" }, { local_description: "ESTACAO B" }]
       });
+    });
+
+    it.each([10, "10"])("returns the local of a record whose terminal_id is %p for the tap terminal '10'", async (terminalId) => {
+      mockTaps([buildTap({ terminal_id: "10" })]);
+      mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValue([{ ...LOCAL_A, terminal_id: terminalId }]);
+
+      const result = await getPaymentTapList({});
+
+      expect(result).toMatchObject({
+        status: 200,
+        data: [{ local_description: "ESTACAO A", group_desc: "001 - Grupo A", subgroup: "Modal A" }]
+      });
+    });
+
+    it("never matches a record without terminal_id", async () => {
+      mockTaps([buildTap()]);
+      mockedPrisma.terminalTreeHistorical.findMany.mockResolvedValue([{ ...LOCAL_A, terminal_id: null }]);
+
+      const result = await getPaymentTapList({});
+
+      expect(result).toMatchObject({ data: [{ local_description: null, group_desc: null, subgroup: null }] });
     });
 
     it("returns null in the local fields for a terminal without record", async () => {
